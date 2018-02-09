@@ -1,0 +1,11 @@
+base
+pdftools
+stringr
+dplyr
+rebus
+purrr
+ggplot2
+tidyr
+knitr
+kableExtra
+bindrcpp

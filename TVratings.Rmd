@@ -1,0 +1,183 @@
+---
+title: "Tidying and Visualizing TV Ratings Data in R"
+author: "Benjamin Ackerman"
+date: "February 5, 2018"
+output: html_document
+---
+```{r packages, echo = FALSE, results='hide', message=FALSE}
+#Here are some packages I'm going to use
+library(pdftools)
+library(stringr)
+library(dplyr)
+library(rebus)
+library(purrr)
+library(ggplot2)
+library(tidyr)
+library(knitr)
+library(kableExtra)
+```
+
+About three years ago, I received a letter in the mail from Nielsen inviting me to participate in one of their panels.  After spending a while on the phone with a representative to determine that it wasn't a scam, I figured I'd give it a go.  I tend to take great interest in knowing where data come from (especially when reporters and media sources try to use statistics to make a point), so as an avid tv watcher, it was cool to learn more about how Nielsen generates ratings and estimate viewership.  My randomly sampled "household" would represent thousands of similarly characterized "households" - white male, early 20s, unmarried, lives alone, etc. - and as long as I kept a small meter in my pocket, my televison-watching habits would contribute to "the ratings" (in retrospect, I'm sure I watched *way* more RuPaul's Drag Race and Project Runway than the average early 20s male...).
+
+The panel ended after about a year and a half, though I still think about it whenever I hear people talk about television program ratings.  Since I've been wanting to start blogging more, I thought it would be fun to write my first post about how to **wrangle and analyze TV ratings data in R!**
+
+--------------------
+
+### Finding and tidying data
+I happened to come across [this blog](http://tvaholics.blogspot.com), which has a wealth of data on tv/movie ratings, such as weekly reports on the viewership of every program on a major broadcast network.  [Here's an example of one such report](http://anythingkiss.com/pi_feedback_challenge/ratings/20180122_TVRatings.pdf).
+
+After reaching out to the #rstats world on Twitter for advice on how to read tables from PDFs, I decided to try to use `pdftools` (There's another package, `tabularize`, that seems great in theory, but was rather buggy in practice).  Given the formatting of the table (variable names and values containing spaces, nothing cleanly or consistently delimited), there was no clean and simple way to turn the text into a data frame, so I had to use some clever regular expressions to turn this
+
+```{r messy data, echo=FALSE, cache = TRUE}
+latest_date = "2018-01-29"
+pdf_name = paste0("http://anythingkiss.com/pi_feedback_challenge/ratings/",format(as.Date(latest_date),"%Y%m%d"),"_TVRatings.pdf")
+  
+download.file(pdf_name,"ratings.pdf",quiet=TRUE)
+text <- pdf_text("ratings.pdf") 
+print(substr(text[1],1,1500))
+invisible(file.remove("ratings.pdf"))
+```
+
+into something nice and tidy like this!
+
+```{r function to get data, echo=FALSE}
+get_ratings = function(date){
+  pdf_name = paste0("http://anythingkiss.com/pi_feedback_challenge/ratings/",format(as.Date(date),"%Y%m%d"),"_TVRatings.pdf")
+  
+  download.file(pdf_name,"ratings.pdf",quiet=TRUE)
+  text <- pdf_text("ratings.pdf") %>% paste(collapse = " ") %>% 
+    str_split("\\n",simplify=TRUE) %>% 
+    t()
+  
+  text = text[str_detect(text,START %R% SPC %R% optional(SPC) %R% DGT)]
+  file.remove("ratings.pdf")
+  
+  for(i in 1:length(text)){
+    pieces_1 = unlist(str_match_all(text[i],SPC %R% optional(DGT) %R% optional(DGT) %R% DGT %R% or(or(":",DOT) %R% DGT %R% optional(DGT),SPC%R%SPC)))
+    if(str_detect(text[i],"Game "%R%DGT)){
+      pieces_1 = pieces_1[-which(pieces_1 %>% str_trim(side = "both") == str_match(text[i],"Game "%R%capture(DGT))[2])]}
+    pieces_2 = unlist(str_match_all(text[i],or("Mon","Tue","Wed","Thu","Fri","Sat","Sun")%R%SPC))                     
+    pieces_3 = unlist(str_match_all(text[i],optional("-") %R% DGT %R% optional(DGT) %R% optional(DGT) %R% "%"))
+    
+    pieces_4 = str_replace_all(text[i],or1(pieces_1),"") %>% 
+      str_replace_all(or1(pieces_2),"") %>% 
+      str_replace_all(or1(pieces_3),"") %>% 
+      str_replace_all("%","") %>% 
+      str_trim(side="both") %>%
+      str_replace(" ","_") %>% 
+      str_split("_") %>% 
+      unlist()
+    
+    if(length(pieces_1)<9){pieces_1 = c(pieces_1,rep(NA,9-length(pieces_1)))}
+    dat = c(pieces_4,pieces_2,pieces_1,pieces_3) %>% str_trim(side = "both")
+    
+    if(length(dat)==12){dat = c(dat,NA)}
+    
+    if(i == 1){data = dat}
+    if(i != 1){data = rbind(data,dat)}
+  }
+  
+  data = data %>% 
+    as.data.frame(stringsAsFactors = FALSE) %>% 
+    select(network = V1, program = V2, weekday = V3, time = V8, P2_ranking = V4, A18_34_ranking = V5, 
+           A18_49_ranking = V6, A25_54_ranking = V7,viewers_millions = V9,A18_34 = V10,
+           A18_49 = V11, A25_54 = V12,P2_change = V13) %>% 
+    mutate(start_of_week = date,
+           date = ifelse(weekday == "Mon",as.Date(date),
+                         ifelse(weekday == "Tue",as.Date(date)+1,
+                                ifelse(weekday == "Wed",as.Date(date)+2,
+                                       ifelse(weekday == "Thu",as.Date(date)+3,
+                                              ifelse(weekday == "Fri",as.Date(date)+4,
+                                                     ifelse(weekday == "Sat",as.Date(date)+5,as.Date(date)+6)))))),
+           date = as.Date(date,origin = "1970-01-01"),
+           full_date = as.POSIXct(paste(date,time,sep=" "))+12*3600,
+           rerun = str_detect(program,"\\[R\\]"),
+           premiere = str_detect(program, "\\(SP\\)"),
+           season_finale = str_detect(program,"\\(SF\\)"),
+           fall_finale = str_detect(program,"\\(FF\\)"),
+           movie = str_detect(program,"Movie: "),
+           program = str_replace(program,or("\\[R\\]","\\(SP\\)","\\(SF\\)","\\(FF\\)","Movie: "),"") %>% str_trim(side = "both")) %>% 
+    filter(network %in% c("ABC","CBS","CW","FOX","NBC"))
+  
+  for(j in c(5:12)){data[,j] = as.numeric(data[,j])}
+  return(data)
+}
+```
+
+```{r get the data, echo=TRUE,eval=FALSE, cache = TRUE}
+latest_date = "2018-01-29"
+get_ratings(latest_date)
+```
+
+```{r display the data, echo=FALSE}
+data = get_ratings(latest_date)
+data %>% 
+  select(program,network,weekday,time,date,viewers_millions,P2_ranking:A25_54_ranking,A18_34:start_of_week,rerun) %>% 
+  head(n=50) %>%
+  kable("html") %>%
+  kable_styling() %>%
+  scroll_box(width = "850px",height="400px")
+```
+
+While the full code for the function `get_ratings` can be found in [this Github repo](https://github.com/benjamin-ackerman/TVratings), I'll explain a little about the regular expressions I used.  Let's use this one line of the PDF text as an example:
+
+```{r show string, echo=FALSE, results='markup'}
+substr(text[1],272,384)
+```
+
+First, I identified some groups of elements to extract together:
+
+  - `\s[\d]?[\d]?\d(?:(?::|\.)\d[\d]?|\s\s)` detected "32", "45", "49", "47", "10:00", "5.00", "0.5" and "1.1"
+  - `(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s` detected "Mon"
+  - `[-]?\d[\d]?[\d]?%` detected "-21%"
+  
+Then, I removed all of the elements above from the string to leave the network and program name, which I then split up into separate elements.  All in all, it took a lot of trial and error to figure out the best regular expressions patterns to use, though the process was made *significantly* easier by using the `rebus` package to work around my limited knowledge of regex semantics (bless you, `rebus`).  And while this may not be the prettiest or most efficient way to extract the data, it got the job done!
+
+### Visualizing the data
+
+Once the data were tidy, the fun could begin! First, I wanted to see what the 20 most viewed programs were last week.  I decided to exclude any reruns of shows to keep the list about new TV content.
+
+```{r most viewed programs, echo=TRUE,fig.align="center",fig.width=9,fig.height=6}
+data %>% 
+  filter(rerun == FALSE) %>% 
+  top_n(n=20,wt = viewers_millions) %>% 
+  select(network,program,viewers_millions,P2_ranking) %>% 
+  ggplot()+geom_bar(aes(x = reorder(program,viewers_millions),y = viewers_millions,fill=network),stat = 'identity')+coord_flip()+
+  labs(x = "TV Show", y = "Viewers (millions)", title="Most Watched Programs on Broadcast TV from January 29-February 4, 2018") + theme_minimal() + scale_y_continuous(expand=c(0,0))
+```
+
+Unsurprisingly, the Super Bowl and its Post Game commentary **dominated** the weekly ratings, and *This Is Us* probably benifited a great deal from the post-Super Bowl time slot.  CBS seems to have a lot of popular shows, while Fox and the CW didn't even make the list.  Unfortunately, data from each network's airing of the State of the Union were not included in the PDF, so they did not make the cut either (though contrary to what one man thinks, [this was not the most watched SOTU ever](http://variety.com/2018/tv/news/trump-state-of-the-union-ratings-1202682703/)).
+
+Next, I was curious to see which network received the highest average number of views on a daily basis.  I decided to just look at Monday-Saturday, since we all know what everyone was watching this past Sunday...
+```{r plot more, fig.align = "center",fig.height=6,fig.width = 11}
+data %>% 
+  group_by(network,weekday) %>% 
+  filter(!weekday == "Sun") %>% 
+  summarise(avgviews = mean(viewers_millions,na.rm=TRUE)) %>% 
+  ggplot()+geom_line(aes(x = weekday,y = avgviews,group=network,col=network))+
+  scale_x_discrete(limits = c("Mon","Tue","Wed","Thu","Fri","Sat"))+ labs(y = "Average Number of Viewers (millions)")+theme_minimal() + scale_y_continuous(expand=c(0,0))
+```
+
+It looks like the CW consistently underperforms in ratings compared to the other major broadcast networks.  Also, Thursday night is clearly the best night for ABC (Shondaland, anybody??).
+
+Lastly, I was wondering how viewership and ratings changed over the past month. By defining a vector of dates over the past month when the PDFs were posted, and then using the `map_df` function in the `purrr` package, I was able to pretty easily gather all of the past month's data in a single data frame.  Again, I restricted the rankings to only show new content, and I compiled lists of the 10 most viewed programs by week (I used `spread` from `tidyr` to distribute the resulting names across four columns, which formed a neat table to display!)
+```{r multiple datasources}
+dates = as.Date(latest_date)-7*c(0:3)
+
+dates %>% 
+  map_df(~get_ratings(.)) %>% 
+  filter(rerun == FALSE) %>% 
+  group_by(start_of_week) %>% 
+  top_n(n=10,wt = viewers_millions) %>% 
+  arrange(desc(start_of_week),desc(viewers_millions)) %>% 
+  select(program,start_of_week) %>% 
+  ungroup() %>% 
+  bind_cols(ranking = rep(1:10,4)) %>% 
+  spread(start_of_week,program) %>% 
+  kable("html") %>% 
+  kable_styling()
+```
+
+Again, no shock that Americans looooooove their football... 
+
+So there you have it!  First blog post: check.  I had a lot of exploring these data, and there are tons of other visualizations and analyses that these data can be used for.  Again, the code with the function to obtain the data can be found on [Github](https://github.com/benjamin-ackerman/TVratings) - I would love to see what else you can come up with while using it!
