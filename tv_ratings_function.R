@@ -1,7 +1,15 @@
+### Load necessary functions:
+library(pdftools)
+library(stringr)
+library(dplyr)
+library(rebus)
+
 ### Function to tidy TV ratings data in R:
 get_ratings = function(date){
+  # Set the name of the html link that contains the pdf file
   pdf_name = paste0("http://anythingkiss.com/pi_feedback_challenge/ratings/",format(as.Date(date),"%Y%m%d"),"_TVRatings.pdf")
   
+  # Download the file, read in the file, and turn it into a vector of strings (then remove the file from computer)
   download.file(pdf_name,"ratings.pdf",quiet=TRUE)
   text <- pdf_text("ratings.pdf") %>% paste(collapse = " ") %>% 
     str_split("\\n",simplify=TRUE) %>% 
@@ -10,6 +18,7 @@ get_ratings = function(date){
   text = text[str_detect(text,START %R% SPC %R% optional(SPC) %R% DGT)]
   file.remove("ratings.pdf")
   
+  # Loop over each line, extract elements
   for(i in 1:length(text)){
     pieces_1 = unlist(str_match_all(text[i],SPC %R% optional(DGT) %R% optional(DGT) %R% DGT %R% or(or(":",DOT) %R% DGT %R% optional(DGT),SPC%R%SPC)))
     if(str_detect(text[i],"Game "%R%DGT)){
@@ -26,6 +35,7 @@ get_ratings = function(date){
       str_split("_") %>% 
       unlist()
     
+    # Fill in missing values
     if(length(pieces_1)<9){pieces_1 = c(pieces_1,rep(NA,9-length(pieces_1)))}
     dat = c(pieces_4,pieces_2,pieces_1,pieces_3) %>% str_trim(side = "both")
     
@@ -35,6 +45,7 @@ get_ratings = function(date){
     if(i != 1){data = rbind(data,dat)}
   }
   
+  # Some more tidying, change variable names, add date of show, some logical variables
   data = data %>% 
     as.data.frame(stringsAsFactors = FALSE) %>% 
     select(network = V1, program = V2, weekday = V3, time = V8, P2_ranking = V4, A18_34_ranking = V5, 
@@ -57,6 +68,7 @@ get_ratings = function(date){
            program = str_replace(program,or("\\[R\\]","\\(SP\\)","\\(SF\\)","\\(FF\\)","Movie: "),"") %>% str_trim(side = "both")) %>% 
     filter(network %in% c("ABC","CBS","CW","FOX","NBC"))
   
+  # Convert variables to numeric
   for(j in c(5:12)){data[,j] = as.numeric(data[,j])}
   return(data)
 }
